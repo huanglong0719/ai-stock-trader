@@ -1,0 +1,68 @@
+{
+  "ok": true,
+  "results": {
+    "root": {
+      "count": 6,
+      "ok": 6,
+      "fail": 0,
+      "avg_ms": 8.97,
+      "max_ms": 16.48
+    },
+    "trading_account": {
+      "count": 6,
+      "ok": 6,
+      "fail": 0,
+      "avg_ms": 7.04,
+      "max_ms": 19.33
+    },
+    "trading_positions": {
+      "count": 6,
+      "ok": 6,
+      "fail": 0,
+      "avg_ms": 55.22,
+      "max_ms": 148.88
+    },
+    "market_overview": {
+      "count": 6,
+      "ok": 6,
+      "fail": 0,
+      "avg_ms": 1565.41,
+      "max_ms": 5080.21
+    },
+    "quote": {
+      "count": 6,
+      "ok": 6,
+      "fail": 0,
+      "avg_ms": 1577.61,
+      "max_ms": 4585.98
+    },
+    "quotes": {
+      "count": 6,
+      "ok": 6,
+      "fail": 0,
+      "avg_ms": 1256.89,
+      "max_ms": 4511.58
+    },
+    "kline_D": {
+      "count": 6,
+      "ok": 6,
+      "fail": 0,
+      "avg_ms": 1363.21,
+      "max_ms": 5005.9
+    },
+    "kline_W": {
+      "count": 6,
+      "ok": 6,
+      "fail": 0,
+      "avg_ms": 1496.41,
+      "max_ms": 5976.99
+    },
+    "kline_M": {
+      "count": 6,
+      "ok": 6,
+      "fail": 0,
+      "avg_ms": 1574.13,
+      "max_ms": 6202.69
+    }
+  }
+}

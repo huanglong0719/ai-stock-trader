@@ -1,0 +1,24 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+include = ["backend/app/**/*.py"]
+exclude = ["venv", ".venv", ".git", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E9", "F821", "F811"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = false
+warn_unused_configs = true
+namespace_packages = true
+explicit_package_bases = true
+no_implicit_optional = false
+check_untyped_defs = true
+disable_error_code = ["import-untyped"]
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+exclude = "(venv|\\.venv|\\.git|__pycache__|market_data_service\\.py)"

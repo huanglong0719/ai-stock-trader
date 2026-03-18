@@ -1,0 +1,1 @@
+﻿[ERROR] TEST FAILED: name 'industry_df' is not defined

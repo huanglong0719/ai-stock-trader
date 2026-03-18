@@ -1,0 +1,8 @@
+Symbol=600871.SH
+Realtime_Expected=开盘 4.27, 最高 4.27, 最低 3.58, 昨收 3.88, 现价 4.14
+Realtime_Context=● 石化油服 (600871.SH): 开盘 4.27, 最高 4.27, 最低 3.58, 昨收 3.88, 现价 4.14, 涨跌幅 6.70%, 成交量 10515846.0 (量比 4.18, 换手 7.76%), 分时均价 4.0671, 当前价高于均价 0.0729 (+1.79%), 成交额 4276862464.0, 数据时间: 未知时间
+Realtime_Match=PASS
+日线_Context_Count=0
+周线_Context_Count=0
+30分钟_Context_Count=0
+5分钟_Context_Count=0

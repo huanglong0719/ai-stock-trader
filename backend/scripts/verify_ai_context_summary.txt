@@ -1,0 +1,13 @@
+Daily_Fetched=30
+Weekly_Fetched=20
+Monthly_Fetched=15
+Min30_Fetched=16
+Min5_Fetched=48
+Daily_Injected=30
+Weekly_Injected=20
+Monthly_Injected=15
+Min30_Injected=16
+Min5_Injected=48
+Realtime_Expected=开盘:4.27 最高:4.27 最低:3.58 现价:4.11 昨收:3.88 涨跌幅:5.93% 量比:N/A 换手:7.67%
+Realtime_Prompt=开盘:4.27 最高:4.27 最低:3.58 现价:4.11 昨收:3.88 涨跌幅:5.93% 量比:N/A 换手:7.67%
+Realtime_Match=PASS

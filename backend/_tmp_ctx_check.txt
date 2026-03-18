@@ -1,0 +1,3 @@
+len=1167
+compressed=True
+has_5y=False

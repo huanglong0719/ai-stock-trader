@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+tushare
+python-dotenv
+pandas
+pydantic
+pydantic-settings
+requests
+sqlalchemy
+apscheduler
+ta
+openai
+pytdx
+redis
+ruff
+mypy
