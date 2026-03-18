@@ -16,6 +16,10 @@ from app.services.market.tushare_client import tushare_client
 import tushare as ts
 from app.services.indicator_service import indicator_service
 
+class TradeCalendarFetchError(Exception):
+    """交易日历获取失败异常"""
+    pass
+
 # 主要市场指数
 MAJOR_INDICES = [
     '000001.SH',  # 上证指数
@@ -63,11 +67,13 @@ class DataSyncService:
                 df = await tushare_client.async_query("trade_cal", params=params, fields="cal_date,is_open")
                 if df is not None and not df.empty:
                     return df
+                last_error = Exception("Empty result returned from trade_cal API")
             except Exception as e:
                 last_error = e
             await asyncio.sleep(min(2 * (attempt + 1), 6))
         if last_error:
-            logger.error(f"Trade calendar fetch failed: {last_error}")
+            logger.error(f"Trade calendar fetch failed after 3 attempts: {last_error}")
+            raise TradeCalendarFetchError(f"Failed to fetch trade calendar: {last_error}")
         return pd.DataFrame()
 
     def init_db(self):
@@ -135,7 +141,14 @@ class DataSyncService:
         trade_date = trade_date.replace('-', '')
         
         # 检查是否已经是已知的非交易日
-        cal_df = await self._fetch_trade_calendar(trade_date, trade_date)
+        try:
+            cal_df = await self._fetch_trade_calendar(trade_date, trade_date)
+        except TradeCalendarFetchError as e:
+            # 日历获取失败，不能继续执行，否则会产生脏数据
+            logger.error(f"[{trade_date}] Cannot verify trading day, aborting sync: {e}")
+            self._update_state(status="error", message=f"Trade calendar fetch failed: {e}")
+            return
+        
         if cal_df is not None and not cal_df.empty:
             if str(cal_df.iloc[0]['is_open']) == '0':
                 logger.info(f"[{trade_date}] is not a trading day, skipping sync.")

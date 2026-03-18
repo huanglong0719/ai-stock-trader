@@ -156,7 +156,7 @@ class MarketDataService:
                         fetched_quotes = await asyncio.wait_for(self._fetch_sina_quotes(to_fetch), timeout=5.0)
                     else:
                         try:
-                            tdx_timeout = 5.0 if force_tdx else 3.0
+                            tdx_timeout = settings.TDX_QUOTE_FORCE_TIMEOUT if force_tdx else settings.TDX_QUOTE_TIMEOUT
                             fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=tdx_timeout)
                             self._tdx_quote_fail_until_ts = 0
                         except Exception as e:
@@ -165,7 +165,7 @@ class MarketDataService:
                             fetched_quotes = await asyncio.wait_for(self._fetch_sina_quotes(to_fetch), timeout=5.0)
                             if not fetched_quotes and not force_tdx:
                                 try:
-                                    fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=5.0)
+                                    fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=settings.TDX_QUOTE_FORCE_TIMEOUT)
                                 except Exception:
                                     fetched_quotes = {}
             except Exception as e:

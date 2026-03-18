@@ -25,11 +25,14 @@ class Settings(BaseSettings):
     NVIDIA_NIM_MODEL: str = "deepseek-ai/deepseek-v3.1-terminus"
 
     # 搜索 API 配置 (可选)
-    SEARCH_API_KEY: str = "" 
+    SEARCH_API_KEY: str = ""
     SEARCH_ENGINE: str = "serper"
-    
+
     # 自动交易开关 (默认开启)
     ENABLE_AUTO_TRADE: bool = True
+
+    # 初始资金配置
+    INITIAL_CAPITAL: float = 1000000.0
 
     # Redis 配置
     REDIS_HOST: str = "localhost"
@@ -57,7 +60,11 @@ class Settings(BaseSettings):
     AI_CONTEXT_SUMMARY_MAX_MERGE_CHARS: int = 8000
 
     TDX_VIPDOC_ROOT: str = r"D:\tdxkxgzhb"
-    
+
+    # TDX 实时行情超时配置 (秒)
+    TDX_QUOTE_TIMEOUT: float = 3.0
+    TDX_QUOTE_FORCE_TIMEOUT: float = 5.0
+
     # Tushare 频率限制 (每分钟最多调用次数)
     TUSHARE_MAX_CALLS_PER_MINUTE: int = 10
     

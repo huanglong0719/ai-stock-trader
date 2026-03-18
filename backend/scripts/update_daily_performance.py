@@ -8,6 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 
 from app.db.session import SessionLocal
 from app.models.stock_models import DailyPerformance, Account
+from app.core.config import settings
 
 def update_performance():
     print("=== 修正今日资金曲线记录 ===")
@@ -32,7 +33,7 @@ def update_performance():
         
         # 3. 获取昨日记录以计算盈亏
         yesterday_perf = db.query(DailyPerformance).filter(DailyPerformance.date < today).order_by(DailyPerformance.date.desc()).first()
-        last_total_assets = yesterday_perf.total_assets if yesterday_perf else 1000000.0
+        last_total_assets = yesterday_perf.total_assets if yesterday_perf else settings.INITIAL_CAPITAL
         
         print(f"昨日 ({yesterday_perf.date if yesterday_perf else 'Initial'}) 总资产: {last_total_assets:.2f}")
 

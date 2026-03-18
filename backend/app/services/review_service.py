@@ -139,8 +139,8 @@ class MarketReviewService:
             })
 
         return {
-            "total_assets": account.total_assets if account else 1000000.0,
-            "available_cash": account.available_cash if account else 1000000.0,
+            "total_assets": account.total_assets if account else settings.INITIAL_CAPITAL,
+            "available_cash": account.available_cash if account else settings.INITIAL_CAPITAL,
             "market_value": account.market_value if account else 0.0,
             "positions": pos_list,
             "pending_orders": plan_list

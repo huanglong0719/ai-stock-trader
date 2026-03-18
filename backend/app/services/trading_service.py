@@ -9,6 +9,7 @@ from app.db.session import SessionLocal
 from app.models.stock_models import TradingPlan, MarketSentiment, Account, Position, TradeRecord, Stock, PatternCase, StockIndicator
 from app.services.logger import logger
 from app.core.config import settings
+from app.core.redis import redis_client
 
 from app.services.data_provider import data_provider
 from app.services.ai_service import ai_service
@@ -16,6 +17,8 @@ from app.services.indicators.technical_indicators import technical_indicators
 from app.services.market.market_utils import get_limit_prices
 from app.utils.concurrency import trading_lock_manager
 from app.services import entrustment_signal
+
+ANALYSIS_HISTORY_KEY_PREFIX = "ai_trader:analysis_history:"
 
 class TradingService:
     """
@@ -144,8 +147,37 @@ class TradingService:
     def _should_trigger_deep_analysis(self, ts_code: str, current_price: float, cooling_minutes: int = 10, price_delta_pct: float = 0.5) -> bool:
         """
         判定是否应该触发深度分析 (冷却时间 + 价格波动双重校验)
+        使用 Redis 持久化存储，确保服务重启后状态不丢失
         """
         now = datetime.now()
+        
+        # 优先从 Redis 获取
+        redis_key = f"{ANALYSIS_HISTORY_KEY_PREFIX}{ts_code}"
+        history_data = None
+        
+        if redis_client:
+            try:
+                history_data = redis_client.hgetall(redis_key)
+            except Exception as e:
+                logger.warning(f"Failed to read analysis history from Redis for {ts_code}: {e}")
+        
+        if history_data and "last_time" in history_data and "last_price" in history_data:
+            try:
+                last_time = datetime.fromisoformat(history_data["last_time"])
+                last_price = float(history_data["last_price"])
+                
+                # 1. 检查冷却时间
+                if now - last_time < timedelta(minutes=cooling_minutes):
+                    # 2. 即使在冷却时间内，如果价格波动剧烈 (超过 0.5%)，也允许重新分析
+                    if last_price > 0:
+                        price_change = abs(current_price - last_price) / last_price * 100
+                        if price_change < price_delta_pct:
+                            return False
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to parse analysis history for {ts_code}: {e}")
+        
+        # 回退到内存缓存（仅当 Redis 不可用时）
         history = self._analysis_history.get(ts_code)
         
         if not history:
@@ -431,9 +463,25 @@ class TradingService:
             return False, "校验异常"
 
     def _update_analysis_history(self, ts_code: str, current_price: float):
-        """记录分析历史"""
+        """记录分析历史，同时持久化到 Redis 和内存"""
+        now = datetime.now()
+        
+        # 1. 更新 Redis（持久化）
+        redis_key = f"{ANALYSIS_HISTORY_KEY_PREFIX}{ts_code}"
+        if redis_client:
+            try:
+                redis_client.hset(redis_key, mapping={
+                    "last_time": now.isoformat(),
+                    "last_price": str(current_price)
+                })
+                # 设置过期时间 24 小时，避免 Redis 无限膨胀
+                redis_client.expire(redis_key, 86400)
+            except Exception as e:
+                logger.warning(f"Failed to update analysis history in Redis for {ts_code}: {e}")
+        
+        # 2. 更新内存缓存（作为回退）
         self._analysis_history[ts_code] = {
-            "last_time": datetime.now(),
+            "last_time": now,
             "last_price": current_price
         }
 
@@ -442,8 +490,8 @@ class TradingService:
         account = db.query(Account).first()
         if not account:
             account = Account(
-                total_assets=1000000.0,
-                available_cash=1000000.0,
+                total_assets=settings.INITIAL_CAPITAL,
+                available_cash=settings.INITIAL_CAPITAL,
                 frozen_cash=0.0,
                 market_value=0.0,
                 total_pnl=0.0
@@ -451,7 +499,7 @@ class TradingService:
             db.add(account)
             db.commit()
             db.refresh(account)
-            logger.info("Initialized new trading account with 1,000,000 capital")
+            logger.info(f"Initialized new trading account with {settings.INITIAL_CAPITAL:,.0f} capital")
         return account
 
     async def _calc_expected_total_cash(self, db: Session) -> float:
@@ -481,7 +529,7 @@ class TradingService:
                 or 0.0
             )
         )
-        initial_capital = 1000000.0
+        initial_capital = settings.INITIAL_CAPITAL
         return float(initial_capital - buy_cost + sell_income)
 
     async def _calc_expected_frozen_cash(self, db: Session) -> float:
@@ -529,9 +577,12 @@ class TradingService:
         finally:
             db.close()
 
-    def _validate_trade_time(self, ts_code: str, record_skip_func) -> bool:
+    def _validate_trade_time(self, ts_code: str, record_skip_func, strict: bool = True) -> bool:
         """
         [New] 统一交易时间检查逻辑 (DRY)
+        :param ts_code: 股票代码
+        :param record_skip_func: 记录跳过原因的回调函数
+        :param strict: 严格模式，如果为 True 则检查完整的交易时段（包括集合竞价拦截）；如果为 False 则仅检查是否在交易日内
         """
         # 1. 基础交易日检查
         if not data_provider.is_trading_time():
@@ -539,32 +590,35 @@ class TradingService:
             if record_skip_func: record_skip_func("非交易时间")
             return False
 
+        if not strict:
+            return True
+
         now_time = datetime.now().time()
-        
+
         # 2. 开盘集合竞价 (9:15-9:25) - 严禁挂单
         if time(9, 15) <= now_time < time(9, 25):
             logger.info(f"Skip execution for {ts_code}: 9:15-9:25 strictly forbidden.")
             if record_skip_func: record_skip_func("集合竞价期间不可成交")
             return False
-            
+
         # 3. 午休期间 (11:30-13:00)
         if time(11, 30) <= now_time < time(13, 0):
             logger.info(f"Skip execution for {ts_code}: Noon break (wait for 13:00).")
             if record_skip_func: record_skip_func("午休不可成交")
             return False
-            
+
         # 4. 收盘集合竞价阶段 (14:57-15:00) - 真实交易在 15:00 一次性撮合
         if self._is_closing_auction_time(now_time):
             logger.info(f"Skip execution for {ts_code}: Closing call auction (wait for 15:00 match).")
             if record_skip_func: record_skip_func("收盘集合竞价期间不可成交")
             return False
-            
+
         # 5. 收盘后不允许成交
         if now_time >= time(15, 0):
             logger.info(f"Skip execution for {ts_code}: After market close.")
             if record_skip_func: record_skip_func("收盘后不可成交")
             return False
-            
+
         return True
 
     async def execute_buy(self, db: Session, plan: TradingPlan, suggested_price: float, volume: int = None) -> bool:
@@ -802,7 +856,7 @@ class TradingService:
                 account.market_value = total_mv
                 account.total_assets = account.available_cash + account.frozen_cash + account.market_value
                 
-                initial_capital = 1000000.0
+                initial_capital = settings.INITIAL_CAPITAL
                 account.total_pnl = account.total_assets - initial_capital
                 account.total_pnl_pct = (account.total_pnl / initial_capital * 100)
 
@@ -1397,7 +1451,8 @@ class TradingService:
             db.close()
 
     async def execute_pending_buy_entrustments(self) -> int:
-        if not data_provider.is_trading_time():
+        # 使用统一验证，确保在非交易时段正确处理
+        if not self._validate_trade_time("__system__", lambda x: None):
             return 0
         from app.services.reward_punish_service import reward_punish_service
         if reward_punish_service.is_trading_paused():
@@ -1473,7 +1528,8 @@ class TradingService:
             db.close()
 
     async def execute_pending_entrustments(self) -> dict:
-        if not data_provider.is_trading_time():
+        # 使用统一验证，确保在非交易时段正确处理
+        if not self._validate_trade_time("__system__", lambda x: None):
             return {"buy_executed": 0, "sell_executed": 0}
 
         buy_executed = await self.execute_pending_buy_entrustments()
@@ -1610,7 +1666,7 @@ class TradingService:
         return total_market_value, updated_count
 
     def _recalc_account_pnl(self, account: Account) -> None:
-        initial_capital = 1000000.0
+        initial_capital = settings.INITIAL_CAPITAL
         account.total_pnl = float(account.total_assets or 0.0) - initial_capital
         account.total_pnl_pct = (account.total_pnl / initial_capital * 100) if initial_capital != 0 else 0.0
 
@@ -1805,7 +1861,7 @@ class TradingService:
     async def monitor_trades(self, force_open_confirm: bool = False):
         # [Fix] 严格限制交易时间，避免非交易时段（尤其是夜间）无意义运行与日志输出
         # 交易时间: 9:15-11:35, 13:00-15:01
-        if not data_provider.is_trading_time():
+        if not self._validate_trade_time("__monitor__", lambda x: None):
             return
 
         if force_open_confirm:
@@ -4086,7 +4142,7 @@ class TradingService:
                 await asyncio.to_thread(db.refresh, account)
             
             # 2. 获取累计盈亏
-            initial_assets = 1000000.0
+            initial_assets = settings.INITIAL_CAPITAL
             total_pnl = account.total_assets - initial_assets
             total_pnl_pct = (total_pnl / initial_assets) * 100 if initial_assets != 0 else 0
             

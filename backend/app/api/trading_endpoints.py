@@ -13,6 +13,7 @@ from app.services.review_service import review_service
 from app.services.logger import logger, selector_logger
 from app.models.stock_models import Account, Position, TradeRecord, MarketSentiment, TradingPlan, Stock
 from app.repositories.trading_repository import TradingRepository
+from app.core.config import settings
 from app.db.session import SessionLocal
 import json
 
@@ -344,8 +345,8 @@ async def get_entrustments(days: int = 7):
             start_date = today - timedelta(days=days)
             # 0. 获取账户资产 (用于计算预计委托量)
             account = db.query(Account).first()
-            total_assets = account.total_assets if account else 1000000.0
-            available_cash = float(account.available_cash) if account else 1000000.0
+            total_assets = account.total_assets if account else settings.INITIAL_CAPITAL
+            available_cash = float(account.available_cash) if account else settings.INITIAL_CAPITAL
 
             # 1. 获取指定天数内的所有计划 (委托)
             plans = db.query(TradingPlan).filter(TradingPlan.date >= start_date).order_by(TradingPlan.date.desc(), TradingPlan.created_at.desc()).all()
@@ -717,7 +718,7 @@ async def refresh_trading_dashboard(days: int = 7):
             fee = max(5.0, need_cash * 0.00025)
             return need_cash + fee
 
-        total_assets_val = float(account.total_assets or 1000000.0)
+        total_assets_val = float(account.total_assets or settings.INITIAL_CAPITAL)
 
         entrustments_out: List[EntrustmentInfo] = []
         for plan in plans:

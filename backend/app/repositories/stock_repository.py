@@ -12,6 +12,7 @@ from app.models.stock_models import (
     Stock, DailyBar, WeeklyBar, MonthlyBar,
     Position, TradingPlan, TradeRecord, Account
 )
+from app.core.config import settings
 
 
 class StockRepository:
@@ -148,8 +149,10 @@ class AccountRepository:
         )
     
     @staticmethod
-    async def create_default(db: Session, initial_capital: float = 1000000.0) -> Account:
+    async def create_default(db: Session, initial_capital: float = None) -> Account:
         """创建默认账户"""
+        if initial_capital is None:
+            initial_capital = settings.INITIAL_CAPITAL
         account = Account()
         account.total_assets = initial_capital
         account.available_cash = initial_capital
