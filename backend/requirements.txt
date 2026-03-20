@@ -12,5 +12,6 @@ ta
 openai
 pytdx
 redis
+psutil
 ruff
 mypy

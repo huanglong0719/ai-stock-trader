@@ -119,13 +119,14 @@ class SchedulerManager:
         #     replace_existing=True
         # )
 
-        # 5. 盘中交易监控 (每分钟) - 确保及时执行 AI 计划
+        # 5. 盘中交易监控 (每3分钟) - 检查计划执行和卖出
+        # [优化] 移除资产同步（打开页面时刷新），降低频率减少资源占用
         self.scheduler.add_job(
             self.trade_monitor_job,
             'cron',
             day_of_week='mon-fri',
-            hour='9-15',
-            minute='*', # 改为每分钟执行一次
+            hour='9-14',
+            minute='*/3',  # 每3分钟执行一次
             id='trade_monitor',
             replace_existing=True
         )
@@ -154,11 +155,12 @@ class SchedulerManager:
         )
 
         # 5.2.1 [新增] 持仓 AI 跟踪 (每5分钟)
+        # [Fix] 限制在 9:00-14:55，15:00 收盘后不再进行持仓 AI 活动
         self.scheduler.add_job(
             self.position_periodic_monitor_job,
             'cron',
             day_of_week='mon-fri',
-            hour='9-15',
+            hour='9-14',
             minute='*/5',
             id='position_periodic_monitor',
             replace_existing=True
@@ -168,31 +170,31 @@ class SchedulerManager:
             self.reward_punish_intraday_job,
             'cron',
             day_of_week='mon-fri',
-            hour='9-15',
+            hour='9-14',
             minute='2,7,12,17,22,27,32,37,42,47,52,57',
             id='reward_punish_intraday',
             replace_existing=True
         )
 
-        # 5.3 [新增] 自动数据巡检与修复 (每小时，错开整点)
-        # 09:20-15:20: 盘中实时修复
-        # 19:20: 盘后全量数据就绪后的终极兜底修复 (确保15:50和17:30的任务都已完成)
+        # 5.3 [修复] 自动数据巡检与修复 - 交易时间禁止批量修复
+        # 盘中(9-15点)只做轻量级检查，不做数据修复，避免影响交易接口响应
+        # 盘后(19:20)进行全量修复
         self.scheduler.add_job(
             self.auto_fix_job,
             'cron',
             day_of_week='mon-fri',
-            hour='9-15,19',
-            minute='20', # 9:20, 10:20... 15:20, 19:20
+            hour='19',  # 仅盘后运行
+            minute='20',
             id='auto_fix_minute_data',
             replace_existing=True
         )
 
-        # [Active Exploration] 仅有挂单时唤醒，监控频率 10 秒
+        # [Active Exploration] 仅有挂单时唤醒，监控频率 5 秒（更快响应）
         # 仅当有活跃挂单时才唤醒 (entrustment_signal)
         entrustment_job = self.scheduler.add_job(
             self.entrustment_monitor_job,
             'interval',
-            seconds=10,
+            seconds=5,
             id=self._entrustment_job_id,
             replace_existing=True
         )
@@ -202,11 +204,12 @@ class SchedulerManager:
             pass
 
         # 6. 盘中市场分析 (每30分钟)
+        # [Fix] 限制在 9:00-14:30，15:00 收盘后不再进行 AI 市场分析
         self.scheduler.add_job(
             self.market_analysis_job,
             'cron',
             day_of_week='mon-fri',
-            hour='9-15',
+            hour='9-14',
             minute='0,30',
             id='market_analysis',
             replace_existing=True
@@ -719,7 +722,7 @@ class SchedulerManager:
             return False
 
     async def _run_trade_monitor(self):
-        """实际执行监控逻辑"""
+        """实际执行监控逻辑 - 检查计划执行和卖出"""
         start = datetime.now()
         results = await asyncio.gather(
             trading_service.check_and_execute_plans(),
@@ -732,7 +735,8 @@ class SchedulerManager:
             if isinstance(r, Exception):
                 logger.error(f"Trade monitor subtask {idx} failed: {type(r).__name__}: {r}")
 
-        await trading_service.sync_account_assets()
+        # [优化] 移除资产同步 - 打开页面时会刷新，AI请求也是最新数据
+        # await trading_service.sync_account_assets()
         logger.info(f"Trade monitor finished in {(datetime.now() - start).total_seconds():.1f}s")
 
     async def market_analysis_job(self):

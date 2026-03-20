@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import pandas as pd
 from datetime import datetime, timedelta, date, time
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Callable
 from contextvars import ContextVar
 from contextlib import contextmanager
 from sqlalchemy import desc, func, case, or_
@@ -15,6 +15,7 @@ from app.services.logger import logger
 from app.services.market.market_utils import is_after_market_close, is_trading_time, normalize_date, get_limit_prices
 from app.services.market.stock_data_service import stock_data_service
 from app.services.tdx_vipdoc_service import TdxVipdocService
+from app.services.rate_limiter import tdx_rate_limiter, sina_rate_limiter, RequestPriority
 from app.models.stock_models import MinuteBar, DailyBar, WeeklyBar, MonthlyBar, StockIndicator, DailyBasic, Stock
 from app.db.session import SessionLocal
 
@@ -102,6 +103,17 @@ class MarketDataService:
         finally:
             market_cache_scope.reset(token)
 
+    def _get_priority_from_scope(self, cache_scope: Optional[str]) -> RequestPriority:
+        scope = (cache_scope or "").lower()
+        if scope == "trading":
+            return RequestPriority.USER_INTERACTIVE
+        elif scope in ("selector", "review"):
+            return RequestPriority.USER_QUERY
+        elif scope in ("realtime", "monitor"):
+            return RequestPriority.NORMAL
+        else:
+            return RequestPriority.BACKGROUND
+
     # --- Core: Realtime Quotes ---
 
     async def get_realtime_quote(self, ts_code: str, cache_scope: Optional[str] = None) -> Optional[Dict]:
@@ -112,9 +124,17 @@ class MarketDataService:
         """
         Get realtime quotes for multiple stocks.
         Priority: Cache -> TDX Network -> Sina Network (Fallback) -> Local DB (Last Resort)
+        
+        cache_scope determines request priority:
+        - "trading": USER_INTERACTIVE (highest, for user trading operations)
+        - "selector": USER_QUERY (high, for user stock selection)
+        - "realtime": NORMAL (for realtime monitoring)
+        - others: BACKGROUND (lowest, for background tasks)
         """
         if not ts_codes:
             return {}
+        
+        priority = self._get_priority_from_scope(cache_scope)
             
         now = datetime.now().timestamp()
         results = {}
@@ -153,21 +173,34 @@ class MarketDataService:
             try:
                 async with self._quote_fetch_lock:
                     if now < self._tdx_quote_fail_until_ts and not force_tdx:
-                        fetched_quotes = await asyncio.wait_for(self._fetch_sina_quotes(to_fetch), timeout=5.0)
+                        try:
+                            tdx_timeout = settings.TDX_QUOTE_TIMEOUT
+                            fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=tdx_timeout, priority=priority)
+                            self._tdx_quote_fail_until_ts = 0
+                        except Exception:
+                            try:
+                                fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=settings.TDX_QUOTE_FORCE_TIMEOUT, priority=priority)
+                                self._tdx_quote_fail_until_ts = 0
+                            except Exception:
+                                fetched_quotes = await asyncio.wait_for(self._fetch_sina_quotes(to_fetch, priority=priority), timeout=5.0)
                     else:
                         try:
                             tdx_timeout = settings.TDX_QUOTE_FORCE_TIMEOUT if force_tdx else settings.TDX_QUOTE_TIMEOUT
-                            fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=tdx_timeout)
+                            fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=tdx_timeout, priority=priority)
                             self._tdx_quote_fail_until_ts = 0
                         except Exception as e:
                             logger.warning(f"TDX quote fetch failed: {e}, falling back to Sina.")
-                            self._tdx_quote_fail_until_ts = now + 6.0
-                            fetched_quotes = await asyncio.wait_for(self._fetch_sina_quotes(to_fetch), timeout=5.0)
-                            if not fetched_quotes and not force_tdx:
-                                try:
-                                    fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=settings.TDX_QUOTE_FORCE_TIMEOUT)
-                                except Exception:
-                                    fetched_quotes = {}
+                            try:
+                                fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=settings.TDX_QUOTE_FORCE_TIMEOUT, priority=priority)
+                                self._tdx_quote_fail_until_ts = 0
+                            except Exception:
+                                fetched_quotes = await asyncio.wait_for(self._fetch_sina_quotes(to_fetch, priority=priority), timeout=5.0)
+                                if not fetched_quotes and not force_tdx:
+                                    try:
+                                        fetched_quotes = await self._fetch_tdx_quotes(to_fetch, timeout=settings.TDX_QUOTE_FORCE_TIMEOUT, priority=priority)
+                                        self._tdx_quote_fail_until_ts = 0
+                                    except Exception:
+                                        fetched_quotes = {}
             except Exception as e:
                 logger.error(f"All quote fetch methods failed: {e}")
             
@@ -182,7 +215,7 @@ class MarketDataService:
         invalid = [c for c in ts_codes if (results.get(c) or {}).get('price', 0) <= 0]
         if invalid and not local_only:
             try:
-                sina_quotes = await asyncio.wait_for(self._fetch_sina_quotes(invalid), timeout=5.0)
+                sina_quotes = await asyncio.wait_for(self._fetch_sina_quotes(invalid, priority=priority), timeout=5.0)
                 for code, q in (sina_quotes or {}).items():
                     if q.get('price', 0) > 0:
                         results[code] = q
@@ -200,22 +233,21 @@ class MarketDataService:
         await self._fill_turnover_rates(results)
         return results
 
-    async def _fetch_tdx_quotes(self, codes: List[str], timeout: float = 3.0) -> Dict[str, Dict]:
+    async def _fetch_tdx_quotes(self, codes: List[str], timeout: float = 3.0, priority: RequestPriority = RequestPriority.NORMAL) -> Dict[str, Dict]:
         from app.services.tdx_data_service import tdx_service
-        # Use a reasonable batch size
         batch_size = 80
         all_quotes = {}
         
         for i in range(0, len(codes), batch_size):
             batch = codes[i:i+batch_size]
             try:
-                raw_quotes = await asyncio.wait_for(
-                    asyncio.to_thread(tdx_service.fetch_realtime_quotes, batch),
-                    timeout=timeout
-                )
+                async with tdx_rate_limiter:
+                    raw_quotes = await asyncio.wait_for(
+                        asyncio.to_thread(tdx_service.fetch_realtime_quotes, batch),
+                        timeout=timeout
+                    )
                 if raw_quotes:
                     for q in raw_quotes:
-                        # Normalize TDX format to Standard format
                         ts_code = self._normalize_tdx_code(q)
                         if ts_code:
                             std_quote = self._format_quote(q, ts_code, source="tdx")
@@ -223,14 +255,15 @@ class MarketDataService:
             except asyncio.TimeoutError:
                 raise RuntimeError("TDX quote fetch timeout")
             except Exception as e:
-                raise e # Let caller handle fallback
+                raise e
                 
         return all_quotes
 
-    async def _fetch_sina_quotes(self, codes: List[str]) -> Dict[str, Dict]:
+    async def _fetch_sina_quotes(self, codes: List[str], priority: RequestPriority = RequestPriority.NORMAL) -> Dict[str, Dict]:
         from app.services.market.sina_data_service import SinaDataService
         sina = SinaDataService()
-        return await sina.fetch_quotes(codes)
+        async with sina_rate_limiter:
+            return await sina.fetch_quotes(codes)
 
     def _normalize_tdx_code(self, q: Dict) -> Optional[str]:
         code = str(q.get('code', ''))
@@ -357,7 +390,7 @@ class MarketDataService:
         
         if adj == 'qfq' and freq in ['D', 'W', 'M'] and self._is_adj_factor_suspicious(kline_data) and not local_only:
             target_limit = max(800, int(limit or 0), len(kline_data) or 0)
-            repaired = await self._fetch_network_kline(ts_code, freq, start_date, end_date, limit=target_limit)
+            repaired = await self._fetch_network_kline(ts_code, freq, start_date or '', end_date or '', limit=target_limit)
             if repaired:
                 await self._save_kline_to_db(ts_code, freq, repaired)
                 kline_data = repaired
@@ -420,9 +453,9 @@ class MarketDataService:
                 return fetched_data
 
         if freq in ['W', 'M'] and not local_only:
-            daily_local = await self._fetch_tdx_local_kline(ts_code, 'D', start_date, end_date, limit)
+            daily_local = await self._fetch_tdx_local_kline(ts_code, 'D', start_date, end_date, limit=None)
             if daily_local:
-                aggregated = self._aggregate_kline_from_daily(daily_local, freq)
+                aggregated = await asyncio.to_thread(self._aggregate_kline_from_daily, daily_local, freq)
                 if aggregated:
                     await self._save_kline_to_db(ts_code, freq, aggregated)
                     return aggregated
@@ -649,11 +682,11 @@ class MarketDataService:
         start_dt = None
         end_dt = None
         try:
-            start_dt = datetime.strptime(str(start).replace('-', ''), '%Y%m%d').date() if start else None
+            start_dt = datetime.strptime(str(start).replace('-', ''), '%Y%m%d').date() if start and str(start).strip() else None
         except Exception:
             start_dt = None
         try:
-            end_dt = datetime.strptime(str(end).replace('-', ''), '%Y%m%d').date() if end else None
+            end_dt = datetime.strptime(str(end).replace('-', ''), '%Y%m%d').date() if end and str(end).strip() else None
         except Exception:
             end_dt = None
         if start_dt:
@@ -804,7 +837,7 @@ class MarketDataService:
                     "high": item['high'],
                     "low": item['low'],
                     "close": item['close'],
-                    "vol": item['volume'],
+                    "vol": item.get('vol') or item.get('volume', 0),
                     "adj_factor": item.get('adj_factor', 1.0)
                 }
                 
@@ -829,22 +862,19 @@ class MarketDataService:
                 
                 records.append(rec)
             
-            # Batch Insert
-            chunk_size = 100
-            for i in range(0, len(records), chunk_size):
-                batch = records[i:i+chunk_size]
-                stmt = insert(model).values(batch)
-                
-                # Upsert logic
-                index_elements = ['ts_code', 'trade_date'] if freq in ['D','W','M'] else ['ts_code', 'trade_time', 'freq']
-                update_dict = {k: v for k, v in batch[0].items() if k not in index_elements}
-                
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=index_elements,
-                    set_=update_dict
-                )
-                db.execute(stmt)
-                db.commit()
+            for rec in records:
+                try:
+                    stmt = insert(model).values(rec)
+                    index_elements = ['ts_code', 'trade_date'] if freq in ['D','W','M'] else ['ts_code', 'trade_time', 'freq']
+                    update_dict = {k: v for k, v in rec.items() if k not in index_elements}
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=index_elements,
+                        set_=update_dict
+                    )
+                    db.execute(stmt)
+                except Exception as e:
+                    logger.warning(f"Failed to save {rec.get('ts_code')} {rec.get('trade_date')}: {e}")
+            db.commit()
                 
         except Exception as e:
             logger.error(f"Background save failed: {e}")
@@ -955,6 +985,8 @@ class MarketDataService:
                 if rem != 0:
                     total_min += (interval - rem)
 
+                if total_min >= 1440:
+                    total_min = 1439
                 bucket = dt_val.replace(hour=total_min // 60, minute=total_min % 60, second=0, microsecond=0)
 
                 if bucket.time() < time(9, 35):
@@ -1112,7 +1144,7 @@ class MarketDataService:
         if not indices or price_sh <= 0:
             logger.warning(f"Index quotes invalid (SH={price_sh}), forcing Sina fallback.")
             try:
-                indices_sina = await self._fetch_sina_quotes(['000001.SH', '399001.SZ', '399006.SZ'])
+                indices_sina = await self._fetch_sina_quotes(['000001.SH', '399001.SZ', '399006.SZ'], priority=RequestPriority.NORMAL)
                 if indices_sina:
                     indices.update(indices_sina)
                 else:
@@ -1212,18 +1244,23 @@ class MarketDataService:
             q = await asyncio.to_thread(tdx_service.fetch_realtime_quotes, ['880005'])
             if q and len(q) > 0:
                 d = q[0]
+                # 880005 涨跌家数字段映射（根据实际数据结构）
+                # price: 上涨家数，open: 下跌家数，high: 总家数
+                # bid_vol5: 涨停家数，ask_vol5: 跌停家数
                 up = int(d.get('price', 0))
                 down = int(d.get('open', 0))
                 total = int(d.get('high', 0))
                 flat = max(0, total - up - down)
-                limit_up = int(d.get('bid_vol5', 0) or d.get('bid1', 0) or 0)
-                limit_down = int(d.get('ask_vol5', 0) or d.get('ask1', 0) or 0)
+                limit_up = int(d.get('bid_vol5', 0))
+                limit_down = int(d.get('ask_vol5', 0))
                 amount = float(d.get('amount', 0)) / 100000000.0
                 if self._is_counts_plausible((up, down, limit_up, limit_down, flat)):
                     stats = (up, down, limit_up, limit_down, flat, round(amount, 2), "TDX_880005")
                     self._market_stats_cache = stats
                     self._market_stats_cache_time = now
                     return stats
+                else:
+                    logger.warning(f"880005 数据不合理: up={up}, down={down}, total={total}, flat={flat}, limit_up={limit_up}, limit_down={limit_down}")
         except Exception as e:
             logger.warning(f"TDX 880005 fetch failed: {e}")
 
@@ -1232,14 +1269,16 @@ class MarketDataService:
             cached = self._market_stats_cache
             return (cached[0], cached[1], cached[2], cached[3], cached[4], cached[5], "TDX_880005_CACHE")
 
-        if is_after_market_close():
-            counts_local = await asyncio.to_thread(stock_data_service.get_market_counts_local)
-            if counts_local:
-                up, down, limit_up, limit_down, flat, amount_yi = counts_local
-                stats = (up, down, limit_up, limit_down, flat, float(amount_yi or 0), "CLOSE_CACHE")
-                self._market_stats_cache = stats
-                self._market_stats_cache_time = now
-                return stats
+        # 尝试本地数据库（收盘数据或历史缓存）
+        counts_local = await asyncio.to_thread(stock_data_service.get_market_counts_local)
+        if counts_local:
+            up, down, limit_up, limit_down, flat, amount_yi = counts_local
+            # 盘中使用本地数据作为降级方案
+            source = "LOCAL_DB" if not is_after_market_close() else "CLOSE_CACHE"
+            stats = (up, down, limit_up, limit_down, flat, float(amount_yi or 0), source)
+            self._market_stats_cache = stats
+            self._market_stats_cache_time = now
+            return stats
 
         if force_tdx:
             return (0, 0, 0, 0, 0, 0.0, "TDX_880005_EMPTY")
@@ -1251,13 +1290,17 @@ class MarketDataService:
     async def get_ai_context_data(self, ts_code: str, no_side_effect: bool = True, cache_scope: Optional[str] = None) -> Dict[str, Any]:
         """Get all context for AI"""
         
+        # [关键修复] 盘中时必须强制获取实时行情和通达信本地 K 线，即使数据库没有数据
+        from app.services.market.market_utils import is_trading_time
+        is_trading = is_trading_time()
+        
         # Parallel Fetch
         results = await asyncio.gather(
             self.get_realtime_quote(ts_code, cache_scope=cache_scope),
-            self.get_kline(ts_code, 'D', limit=60, adj='qfq', include_indicators=True, cache_scope=cache_scope),
-            self.get_kline(ts_code, 'W', limit=20, adj='qfq', include_indicators=True, cache_scope=cache_scope),
-            self.get_kline(ts_code, 'M', limit=12, adj='qfq', include_indicators=True, cache_scope=cache_scope),
-            self.get_kline(ts_code, '30min', limit=16, adj='qfq', include_indicators=True, cache_scope=cache_scope),
+            self.get_kline(ts_code, 'D', limit=60, adj='qfq', include_indicators=True, cache_scope=cache_scope, local_only=not is_trading),
+            self.get_kline(ts_code, 'W', limit=20, adj='qfq', include_indicators=True, cache_scope=cache_scope, local_only=not is_trading),
+            self.get_kline(ts_code, 'M', limit=12, adj='qfq', include_indicators=True, cache_scope=cache_scope, local_only=not is_trading),
+            self.get_kline(ts_code, '30min', limit=16, adj='qfq', include_indicators=True, cache_scope=cache_scope, local_only=not is_trading),
             return_exceptions=True
         )
         
@@ -1267,6 +1310,26 @@ class MarketDataService:
         weekly = results[2] if not isinstance(results[2], Exception) else []
         monthly = results[3] if not isinstance(results[3], Exception) else []
         min30 = results[4] if not isinstance(results[4], Exception) else []
+        
+        # [增强] 如果日线为空且是盘中，强制从通达信获取
+        if is_trading and not daily:
+            logger.warning(f"[AI Context] DB empty for {ts_code}, forcing TDX local fetch...")
+            try:
+                daily = await self._fetch_tdx_local_kline(ts_code, 'D', '', '', limit=60)
+                if daily:
+                    logger.info(f"[AI Context] TDX local fetch success for {ts_code}: {len(daily)} bars")
+            except Exception as e:
+                logger.error(f"[AI Context] TDX local fetch failed for {ts_code}: {e}")
+        
+        # [增强] 如果 30 分钟线为空且是盘中，强制从通达信获取
+        if is_trading and not min30:
+            logger.warning(f"[AI Context] 30min empty for {ts_code}, forcing TDX local fetch...")
+            try:
+                min30 = await self._fetch_tdx_local_kline(ts_code, '30min', '', '', limit=16)
+                if min30:
+                    logger.info(f"[AI Context] TDX 30min local fetch success for {ts_code}: {len(min30)} bars")
+            except Exception as e:
+                logger.error(f"[AI Context] TDX 30min local fetch failed for {ts_code}: {e}")
         
         stats = await self._get_ai_stats(ts_code)
 
@@ -1350,9 +1413,12 @@ class MarketDataService:
         trade_date = await asyncio.to_thread(stock_data_service.get_latest_trade_date_local)
         rows = await asyncio.to_thread(stock_data_service.get_top_turnover_local, trade_date, top_n)
         if not rows:
-            fallback_date = await asyncio.to_thread(stock_data_service.get_latest_trade_date)
+            def _get_fallback_date() -> Optional[str]:
+                result = stock_data_service.get_latest_trade_date()
+                return result.strftime("%Y%m%d") if result else None
+            fallback_date = await asyncio.to_thread(_get_fallback_date)
             if fallback_date:
-                trade_date = fallback_date.strftime("%Y%m%d")
+                trade_date = fallback_date
                 rows = await asyncio.to_thread(stock_data_service.get_top_turnover_local, trade_date, top_n)
         turnover_rate_map: Dict[str, float] = {}
         if not rows:
@@ -1406,7 +1472,10 @@ class MarketDataService:
                     if b.get("ts_code")
                 }
             else:
-                fallback_date = await asyncio.to_thread(stock_data_service.get_latest_trade_date_local)
+                def _get_fallback_date_str() -> str:
+                    result = stock_data_service.get_latest_trade_date_local()
+                    return result if result else ""
+                fallback_date = await asyncio.to_thread(_get_fallback_date_str)
                 if fallback_date and fallback_date != trade_date:
                     basics = await asyncio.to_thread(stock_data_service.get_daily_basic_local, fallback_date)
                     if basics:
@@ -1491,10 +1560,6 @@ class MarketDataService:
     def _is_index_or_industry(self, ts_code: str) -> bool:
         return self._is_index(ts_code)
 
-    async def get_sector_context(self, ts_code: str): return {}
-    async def get_moneyflow(self, ts_code: str): return {}
-    async def get_fina_indicator(self, ts_code: str): return {}
-    async def buffer_realtime_quotes(self, codes): pass
     async def get_daily_basic(self, trade_date: str = None, ts_code: str = None, ts_codes: List[str] = None, allow_fallback_latest: bool = False):
         target_date = trade_date
         if not target_date and allow_fallback_latest:
@@ -1532,8 +1597,6 @@ class MarketDataService:
     async def get_market_turnover_top_codes(self, top_n: int = 200) -> List[str]:
         rows = await self.get_market_turnover_top(top_n=top_n)
         return [str(r.get("ts_code")) for r in rows if isinstance(r, dict) and r.get("ts_code")]
-    async def get_ths_turnover_top_codes(self, top_n: int = 100) -> List[str]: return []
-    async def get_realtime_speed_top(self, top_n: int = 10) -> List[Dict]: return []
 
     # --- Deprecated / Legacy Stubs ---
     async def get_active_stock_codes(self): return set()
