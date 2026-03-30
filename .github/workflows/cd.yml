@@ -1,0 +1,53 @@
+name: CD
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r backend/requirements.txt
+
+    - name: Run tests
+      run: |
+        cd backend
+        pytest tests/ --cov=app
+
+    - name: Create release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release v${{ steps.get_version.outputs.VERSION }}
+        body_path: ./CHANGELOG.md
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      if: success()
+      run: |
+        echo "Building Docker image for version ${{ steps.get_version.outputs.VERSION }}"
+        # 这里添加你的 Docker 构建和推送逻辑
+        # docker build -t your-registry/ai-stock-trader:${{ steps.get_version.outputs.VERSION }} .
+        # docker push your-registry/ai-stock-trader:${{ steps.get_version.outputs.VERSION }}

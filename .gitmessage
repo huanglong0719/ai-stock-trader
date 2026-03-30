@@ -1,0 +1,45 @@
+# Commit Message Format
+#
+# <type>(<scope>): <subject>
+# <BLANK LINE>
+# <body>
+# <BLANK LINE>
+# <footer>
+#
+# Type 分类:
+# feat: 新功能
+# fix: 修复bug
+# docs: 文档更新
+# style: 代码格式调整
+# refactor: 重构
+# perf: 性能优化
+# test: 测试相关
+# build: 构建相关
+# ci: CI配置
+# chore: 其他修改
+# revert: 回滚
+#
+# Scope 范围 (可选):
+# backend, frontend, api, services, models, config, docs, tests
+#
+# Subject 要求:
+# - 使用现在时态
+# - 首字母小写
+# - 不加句号
+# - 不超过50字符
+#
+# Body 要求 (可选):
+# - 说明修改原因和解决方案
+# - 每行不超过72字符
+#
+# Footer 要求 (可选):
+# - 关联的issue或PR
+# - BREAKING CHANGE: 破坏性变更说明
+
+# 示例:
+# feat(backend): 添加TDX数据服务连接池
+#
+# 实现连接池管理，支持高并发数据请求
+# 添加熔断机制防止服务雪崩
+#
+# Closes #123
