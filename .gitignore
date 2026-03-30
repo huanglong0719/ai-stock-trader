@@ -63,9 +63,47 @@ logs/
 NVIDIA_NIM_API_KEY=*.txt
 *.pem
 *.key
+credentials.*
+secrets.*
+.env*
+!.env.example
 
-# GitHub Actions (if any)
-.github/
+# Project specific
+backend/data/cache/
+backend/uploads/
+backend/logs/
+backend/temp/
+backend/debug_screenshots/
+
+# Frontend
+frontend/node_modules/
+frontend/.npm
+frontend/.cache/
+frontend/.parcel-cache/
+frontend/build/
+frontend/dist/
+frontend/.vite/
+
+# Debug and temp files
+debug_*.py
+check_*.py
+fix_*.py
+find_*.py
+temp_*.py
+*_tmp.*
+backend/_check_*.py
+backend/_verify_*.py
+backend/_trace_*.py
+backend/_tmp_*.json
+
+# Documentation builds
+docs/_build/
+
+# Performance reports
+.performance/
+
+# Memory system (Claude Code)
+.claude/
 
 # Useless Trae rules files
 .trae/
